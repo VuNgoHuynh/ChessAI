@@ -1,0 +1,6 @@
+PythonAI3.12/
+__pycache__/
+*.pyc
+.idea/
+.pytest_cache/
+.claude/
