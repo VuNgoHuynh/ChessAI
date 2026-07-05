@@ -26,7 +26,7 @@ If you like this project, **consider giving it a ⭐ — it helps others find it
 ### Run it
 
 ```bash
-pip install pygame python-chess
+pip install -r requirements.txt
 python Main.py
 ```
 
