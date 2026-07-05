@@ -152,10 +152,127 @@ def _material_evaluate(board):
     return 1.0 / (1.0 + math.exp(-diff / 400.0))
 
 
+# Piece-square tables (centipawns), one per piece type, 64 entries each in
+# the standard "a8 first" layout used throughout chess literature: index 0 is
+# a8, index 7 is h8, ... index 56 is a1, index 63 is h1 (row-major, top rank
+# first). Values encode positional preferences from White's point of view
+# (e.g. pawns are worth more the closer they get to promotion on rank 8).
+_PAWN_PST = (
+      0,   0,   0,   0,   0,   0,   0,   0,
+     50,  50,  50,  50,  50,  50,  50,  50,
+     10,  10,  20,  30,  30,  20,  10,  10,
+      5,   5,  10,  25,  25,  10,   5,   5,
+      0,   0,   0,  20,  20,   0,   0,   0,
+      5,  -5, -10,   0,   0, -10,  -5,   5,
+      5,  10,  10, -20, -20,  10,  10,   5,
+      0,   0,   0,   0,   0,   0,   0,   0,
+)
+_KNIGHT_PST = (
+    -50, -40, -30, -30, -30, -30, -40, -50,
+    -40, -20,   0,   0,   0,   0, -20, -40,
+    -30,   0,  10,  15,  15,  10,   0, -30,
+    -30,   5,  15,  20,  20,  15,   5, -30,
+    -30,   0,  15,  20,  20,  15,   0, -30,
+    -30,   5,  10,  15,  15,  10,   5, -30,
+    -40, -20,   0,   5,   5,   0, -20, -40,
+    -50, -40, -30, -30, -30, -30, -40, -50,
+)
+_BISHOP_PST = (
+    -20, -10, -10, -10, -10, -10, -10, -20,
+    -10,   0,   0,   0,   0,   0,   0, -10,
+    -10,   0,   5,  10,  10,   5,   0, -10,
+    -10,   5,   5,  10,  10,   5,   5, -10,
+    -10,   0,  10,  10,  10,  10,   0, -10,
+    -10,  10,  10,  10,  10,  10,  10, -10,
+    -10,   5,   0,   0,   0,   0,   5, -10,
+    -20, -10, -10, -10, -10, -10, -10, -20,
+)
+_ROOK_PST = (
+      0,   0,   0,   0,   0,   0,   0,   0,
+      5,  10,  10,  10,  10,  10,  10,   5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+     -5,   0,   0,   0,   0,   0,   0,  -5,
+      0,   0,   0,   5,   5,   0,   0,   0,
+)
+_QUEEN_PST = (
+    -20, -10, -10,  -5,  -5, -10, -10, -20,
+    -10,   0,   0,   0,   0,   0,   0, -10,
+    -10,   0,   5,   5,   5,   5,   0, -10,
+     -5,   0,   5,   5,   5,   5,   0,  -5,
+      0,   0,   5,   5,   5,   5,   0,  -5,
+    -10,   5,   5,   5,   5,   5,   0, -10,
+    -10,   0,   5,   0,   0,   0,   0, -10,
+    -20, -10, -10,  -5,  -5, -10, -10, -20,
+)
+_KING_PST = (
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -30, -40, -40, -50, -50, -40, -40, -30,
+    -20, -30, -30, -40, -40, -30, -30, -20,
+    -10, -20, -20, -20, -20, -20, -20, -10,
+     20,  20,   0,   0,   0,   0,  20,  20,
+     20,  30,  10,   0,   0,  10,  30,  20,
+)
+
+# piece type -> its table above.
+PST = {
+    chess.PAWN: _PAWN_PST,
+    chess.KNIGHT: _KNIGHT_PST,
+    chess.BISHOP: _BISHOP_PST,
+    chess.ROOK: _ROOK_PST,
+    chess.QUEEN: _QUEEN_PST,
+    chess.KING: _KING_PST,
+}
+
+
+def _pst_value(table, square, color):
+    """Look up `table` for `square`, from `color`'s point of view.
+
+    The tables above are written a8-first, i.e. indexed by
+    ``chess.square_mirror(square)`` for a White piece (mirroring the rank
+    turns python-chess's a1-based numbering into the table's a8-based
+    reading order). A Black piece on `square` is worth what a White piece
+    would be worth on the vertically-mirrored square, so it indexes the same
+    table directly with `square` (no mirroring) — the double mirror cancels.
+    """
+    return table[chess.square_mirror(square) if color == chess.WHITE else square]
+
+
+def _pst_evaluate(board):
+    """Evaluator: material balance plus piece-square positional bonuses.
+
+    Same White-perspective [0, 1] contract and logistic squash as
+    :func:`_material_evaluate`, just with a richer centipawn `diff` that also
+    rewards well-placed pieces, not just their raw count.
+    """
+    if board.is_game_over():
+        result = board.result()
+        if result == "1-0":
+            return 1.0
+        if result == "0-1":
+            return 0.0
+        return 0.5
+    diff = 0
+    for piece_type, value in PIECE_VALUE.items():
+        table = PST[piece_type]
+        for square in board.pieces(piece_type, chess.WHITE):
+            diff += value + _pst_value(table, square, chess.WHITE)
+        for square in board.pieces(piece_type, chess.BLACK):
+            diff -= value + _pst_value(table, square, chess.BLACK)
+    return 1.0 / (1.0 + math.exp(-diff / 400.0))
+
+
 DEFAULT_EVALUATOR = "material"
 
 # Name -> callable(board) -> [0, 1]. Register new ones with register_evaluator.
 EVALUATORS = {DEFAULT_EVALUATOR: _material_evaluate}
+# Import-time registration: see register_evaluator's docstring below for why
+# this must happen here rather than under `if __name__ == "__main__"`.
+EVALUATORS["pst"] = _pst_evaluate
 
 
 def register_evaluator(name, fn):
