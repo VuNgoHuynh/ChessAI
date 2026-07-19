@@ -16,11 +16,11 @@ import random
 # module on Windows — stay quiet too, instead of each printing the banner.
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-import pygame
 import chess
+import pygame
 
-from entity import BoardGenerator, HumanPlayer, EnginePlayer
-from entity.board import WIDTH, HEIGHT, TOTAL_WIDTH
+from entity import BoardGenerator, EnginePlayer, HumanPlayer
+from entity.board import HEIGHT, TOTAL_WIDTH, WIDTH
 
 # How long the AI "thinks" before playing, in milliseconds.
 ENGINE_DELAY = 300

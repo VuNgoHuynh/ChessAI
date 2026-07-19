@@ -20,8 +20,8 @@ import os
 # spawned MCTS workers that import this module first don't print it.
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
-import pygame
 import chess
+import pygame
 
 from .sound import SoundEffect
 

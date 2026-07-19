@@ -6,15 +6,15 @@ python-chess position. Asset paths are resolved relative to the repository root
 so it works regardless of the current working directory.
 """
 
-import os
 import json
+import os
 import random
 import urllib.request
 
-import pygame
 import chess
+import pygame
 
-from .board import Board, SQSIZE
+from .board import SQSIZE, Board
 from .sound import SoundEffect
 
 # Repository root == parent of this entity package.
