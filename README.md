@@ -25,6 +25,11 @@ If you like this project, **consider giving it a ⭐ — it helps others find it
 
 ### Run it
 
+Clone the repo via terminal
+```bash
+gh repo clone VuNgoHuynh/ChessAI
+```
+Install the required packages
 ```bash
 pip install -r requirements.txt
 python Main.py
