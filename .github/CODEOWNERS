@@ -1,0 +1,11 @@
+# Code owners for ChessAI.
+#
+# CODEOWNERS takes effect on the default branch (master). Combined with the
+# branch-protection rule "Require review from Code Owners", this makes the
+# repository owner the required approver for every pull request into master —
+# i.e. only @VuNgoHuynh can approve a PR to merge.
+#
+# (GitHub does not let you approve your own pull request; with enforce_admins
+# disabled, the owner still merges their own PRs directly as an admin.)
+
+*       @VuNgoHuynh
