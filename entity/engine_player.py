@@ -306,8 +306,13 @@ def _backpropagate(node, white_score):
         node = node.parent
 
 
-def _search_visits(root_board, num_simulation, evaluator=DEFAULT_EVALUATOR):
-    """Grow one MCTS tree and return ``{move.uci(): visits}`` for root children.
+def _search_stats(root_board, num_simulation, evaluator=DEFAULT_EVALUATOR):
+    """Grow one MCTS tree and return ``{move.uci(): (visits, wins)}`` per child.
+
+    This is the shared search primitive. ``wins`` for a root child is the total
+    score credited from the perspective of the side that *moved into* the child
+    — i.e. the side to move at the root (the mover) — so ``wins / visits`` is
+    already that mover's win probability for the move, for either colour.
 
     ``evaluator`` is the *name* of the leaf evaluator; it is resolved to its
     callable once here (not per rollout).
@@ -318,7 +323,18 @@ def _search_visits(root_board, num_simulation, evaluator=DEFAULT_EVALUATOR):
         node = _select(root)
         score = _rollout(node.board, evaluate)
         _backpropagate(node, score)
-    return {child.move.uci(): child.visits for child in root.children}
+    return {child.move.uci(): (child.visits, child.wins)
+            for child in root.children}
+
+
+def _search_visits(root_board, num_simulation, evaluator=DEFAULT_EVALUATOR):
+    """Grow one MCTS tree and return ``{move.uci(): visits}`` for root children.
+
+    Thin wrapper over :func:`_search_stats` (the single tree driver) that drops
+    the win totals, used by the move-selection play path.
+    """
+    return {uci: visits for uci, (visits, _wins)
+            in _search_stats(root_board, num_simulation, evaluator).items()}
 
 
 def _worker(args):
@@ -334,6 +350,19 @@ def _worker(args):
     random.seed()
     board = chess.Board(fen, chess960=chess960)
     return _search_visits(board, num_simulation, evaluator)
+
+
+def _worker_stats(args):
+    """Pool task like :func:`_worker` but returning ``{uci: (visits, wins)}``.
+
+    Used by the hint search (``EnginePlayer.suggest``) so per-move win rates
+    can be aggregated across the independent trees. Import- and spawn-safe (a
+    module-level function) exactly like ``_worker``.
+    """
+    fen, num_simulation, evaluator, chess960 = args
+    random.seed()
+    board = chess.Board(fen, chess960=chess960)
+    return _search_stats(board, num_simulation, evaluator)
 
 
 class EnginePlayer:
@@ -400,6 +429,73 @@ class EnginePlayer:
 
         visits = _search_visits(state.copy(), self.num_simulation, self.evaluator)
         return chess.Move.from_uci(max(visits, key=visits.get))
+
+    def suggest(self, board):
+        """Return an MCTS hint for the side to move on ``board`` (entity.Board).
+
+        Colour-agnostic: it evaluates whoever is to move — used to hint the
+        *human*, independently of ``self.color`` (the search never reads it).
+        Returns a dict, or ``None`` when there is nothing to play (game over /
+        no legal moves)::
+
+            {
+                "move":      chess.Move,   # the most-visited (recommended) move
+                "win_rate":  float,        # that move's win probability, [0, 1]
+                "win_rates": {uci: float}, # every explored move's win rate
+            }
+
+        ``win_rate`` is the mover's own win probability: a root child's
+        ``wins / visits`` is credited from the mover's perspective by
+        :func:`_backpropagate`, so it is reported directly (no re-derivation)
+        for either colour. The recommended move is the most-*visited* one (the
+        robust MCTS choice); its win rate is displayed alongside for
+        consistency.
+        """
+        state = board.board
+        if state.is_game_over():
+            return None
+        if not any(state.legal_moves):
+            return None
+
+        stats = None
+        if self.num_workers > 1:
+            stats = self._parallel_stats(state)
+        if stats is None:  # serial in-process fallback
+            stats = _search_stats(state.copy(), self.num_simulation,
+                                  self.evaluator)
+        if not stats:
+            return None
+
+        win_rates = {uci: (wins / visits if visits else 0.0)
+                     for uci, (visits, wins) in stats.items()}
+        best_uci = max(stats, key=lambda u: stats[u][0])  # most visited
+        return {
+            "move": chess.Move.from_uci(best_uci),
+            "win_rate": win_rates[best_uci],
+            "win_rates": win_rates,
+        }
+
+    def _parallel_stats(self, state):
+        """Run ``num_workers`` trees in parallel; return summed per-move stats.
+
+        Returns ``{uci: (visits, wins)}`` aggregated across the independent
+        trees, or ``None`` on any multiprocessing failure so ``suggest`` can
+        fall back to a serial search.
+        """
+        fen = state.fen()
+        tasks = [(fen, self.num_simulation, self.evaluator, state.chess960)] * self.num_workers
+        try:
+            results = self._get_pool().map(_worker_stats, tasks)
+        except Exception:
+            self._close_pool()
+            return None
+
+        totals = {}
+        for result in results:
+            for uci, (visits, wins) in result.items():
+                v, w = totals.get(uci, (0, 0.0))
+                totals[uci] = (v + visits, w + wins)
+        return totals or None
 
     def _parallel_best_uci(self, state):
         """Run ``num_workers`` trees in parallel; return the winning move's UCI.
