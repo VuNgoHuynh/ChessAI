@@ -2,8 +2,8 @@
 
 from .board import Board
 from .board_generator import BoardGenerator
-from .human_player import HumanPlayer
 from .engine_player import EnginePlayer, register_evaluator
+from .human_player import HumanPlayer
 from .sound import SoundEffect
 
 __all__ = [

@@ -1,0 +1,13 @@
+# Normalize line endings: keep LF in the repository regardless of OS.
+* text=auto
+
+# These are executed/parsed on Linux (CI) or by bash — must stay LF even when
+# checked out on Windows, or the workflow's shell steps break with $'\r' errors.
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+*.py    text eol=lf
+
+# Binary assets — never touch.
+*.png   binary
+*.mp3   binary
