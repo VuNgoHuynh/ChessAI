@@ -1,0 +1,12 @@
+# Lint config for the self-healing CI pipeline.
+#
+# Deliberately conservative: only high-signal, safely auto-fixable rules so the
+# autofix job never churns the project's hand-wrapped style.
+#   F = pyflakes  — real errors (unused imports, undefined names, ...)
+#   I = isort     — import ordering (auto-fixable)
+# We do NOT run `ruff format` (it would reflow the hand-crafted line wrapping).
+target-version = "py312"
+line-length = 88
+
+[lint]
+select = ["F", "I"]

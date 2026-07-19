@@ -1,0 +1,154 @@
+name: CI
+
+# Self-healing pipeline for the pygame chess project.
+#
+# Runs the headless test suite on every push/PR to master. "Self-healing" here
+# means three deterministic behaviours (no secrets, only the built-in
+# GITHUB_TOKEN):
+#   * transient pip/network failures are retried instead of hard-failing;
+#   * a ruff autofix job repairs lint issues and commits them back to PR
+#     branches (keeping the tree healthy over time);
+#   * a real failure on master opens/updates a single tracking issue so a red
+#     build is never silently lost.
+#
+# Fork-PR note: for pull requests from forks the GITHUB_TOKEN is read-only, so
+# the autofix push and issue creation cannot run. The autofix job is gated to
+# same-repo PRs for that reason; this is a solo repo so it is a non-issue.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel superseded runs on the same ref (e.g. rapid pushes to a PR).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # autofix commits back to PR branches
+  issues: write     # heal job opens/updates the CI-failure tracking issue
+
+env:
+  SDL_VIDEODRIVER: dummy
+  SDL_AUDIODRIVER: dummy
+  PYGAME_HIDE_SUPPORT_PROMPT: "1"
+
+jobs:
+  test:
+    name: Test (headless)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies (retry transient pip/network failures)
+        run: |
+          install() {
+            python -m pip install --upgrade pip && \
+            pip install -r requirements.txt pytest
+          }
+          for attempt in 1 2 3; do
+            if install; then echo "dependencies installed"; exit 0; fi
+            echo "::warning::pip install attempt $attempt failed; retrying in 10s"
+            sleep 10
+          done
+          echo "::error::pip install failed after 3 attempts"
+          exit 1
+
+      - name: Run tests
+        run: python -m pytest
+
+  autofix:
+    name: Auto-fix lint (ruff, PR only)
+    # Same-repo PRs only: fork PRs get a read-only token that cannot push.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ruff (retry transient failures)
+        run: |
+          for attempt in 1 2 3; do
+            if pip install ruff; then exit 0; fi
+            echo "::warning::ruff install attempt $attempt failed; retrying in 10s"
+            sleep 10
+          done
+          echo "::error::ruff install failed after 3 attempts"
+          exit 1
+
+      - name: Apply safe autofixes (import ordering only)
+        # Deliberately --select I: auto-commit ONLY import sorting, which
+        # reorders but never removes a name. We do NOT auto-apply F fixes here —
+        # e.g. removing an "unused" import could be an import another in-flight
+        # branch is about to use, silently breaking it on merge. F is surfaced
+        # by the report step below instead.
+        run: ruff check --fix --select I --exit-zero .
+
+      - name: Commit fixes back to the PR branch
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "nothing to fix"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # [skip ci] is belt-and-braces: GITHUB_TOKEN pushes don't retrigger
+          # workflows anyway, so this commit won't loop.
+          git commit -am "style: auto-sort imports (ruff) [skip ci]"
+          git push
+
+      - name: Lint report (non-blocking — surfaces F issues without editing)
+        if: always()
+        run: ruff check --output-format concise . || true
+
+  heal:
+    name: Self-heal (open failure issue on master)
+    needs: test
+    if: failure() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Open or update the CI-failure tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          # Ensure the dedup label exists (idempotent).
+          gh label create ci-failure --color B60205 \
+            --description "Automated: CI failing on master" --force
+
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body=$(printf 'CI failed on master at commit `%s`.\n\nFailing run: %s\n\n_Opened automatically by the self-healing pipeline._' \
+                 "$GITHUB_SHA" "$run_url")
+
+          # Dedup: update the existing open issue if one is already tracking this.
+          existing=$(gh issue list --label ci-failure --state open \
+                     --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "Updating existing issue #$existing"
+            gh issue comment "$existing" --body "$body"
+          else
+            echo "Opening a new tracking issue"
+            gh issue create --title "CI failing on master" \
+              --label ci-failure --body "$body"
+          fi
