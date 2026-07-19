@@ -126,6 +126,44 @@ def show_mode_menu(screen):
     ])
 
 
+def _show_hint(screen, board, engine):
+    """Compute an MCTS hint for the human and store it on the board.
+
+    Blocks for a search (same engine the AI uses), so paint a "Thinking..."
+    badge over the current board first. The hint records the recommended move,
+    its MCTS win rate, and the enemy pieces that could recapture on it; the
+    Board draws the highlight + popup. A None result (nothing to play) leaves
+    any prior hint cleared.
+    """
+    board.draw()
+    badge = pygame.Rect(0, 0, 240, 60)
+    badge.center = (WIDTH // 2, HEIGHT // 2)
+    veil = pygame.Surface((badge.width, badge.height))
+    veil.set_alpha(225)
+    veil.fill((28, 26, 24))
+    screen.blit(veil, badge.topleft)
+    try:
+        if not pygame.font.get_init():
+            pygame.font.init()
+        font = pygame.font.SysFont("Arial", 30, bold=True)
+        surf = font.render("Thinking...", True, (235, 235, 235))
+        screen.blit(surf, surf.get_rect(center=badge.center))
+    except Exception:
+        pass
+    pygame.display.flip()
+
+    board.hint = None
+    hint = engine.suggest(board)
+    if hint is None:
+        return
+    move = hint["move"]
+    board.hint = {
+        "move": move,
+        "win_rate": hint["win_rate"],
+        "attackers": board.hint_attackers(move),
+    }
+
+
 def _new_board(screen, player_color, mode):
     """Build a fresh Board for the given side and mode.
 
@@ -217,6 +255,10 @@ def main(max_frames=None, player_color=None, mode=None):
                 if board.new_game_clicked(event.pos):
                     # Game over: restart a fresh game, same side and mode.
                     board = _new_board(screen, player_color, mode)
+                elif board.hint_clicked(event.pos):
+                    # "?" hint: only meaningful on the human's turn.
+                    if board.board.turn == human.color:
+                        _show_hint(screen, board, engine)
                 elif not board.board.is_game_over() and board.board.turn == human.color:
                     move = human.handle_click(event.pos, board)
                     if move is not None:

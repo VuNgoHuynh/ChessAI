@@ -48,6 +48,22 @@ NEWGAME_BG = (238, 238, 210)
 NEWGAME_FG = (33, 31, 29)
 NEWGAME_W, NEWGAME_H = 220, 64
 
+# Promotion picker (the four choices offered when a pawn reaches the last rank).
+# Offered top-to-bottom in this order; the human's promotion square is always
+# row 0 (the far rank sits at the top in both orientations), so the picker is
+# stacked downward from it and always stays on-board.
+PROMO_ORDER = (chess.QUEEN, chess.ROOK, chess.BISHOP, chess.KNIGHT)
+PROMO_CELL_BG = (245, 245, 245)
+PROMO_CELL_BORDER = (33, 31, 29)
+
+# Hint feature ("?" button + suggestion popup).
+HINTCOLOR = (120, 190, 245)       # tint of the suggested move / popup accent
+HINTALPHA = 150
+HINT_BTN_BG = (120, 190, 245)
+HINT_BTN_FG = (20, 30, 45)
+HINT_POPUP_BG = (28, 26, 24)
+HINT_POPUP_FG = (235, 235, 235)
+
 # Move-log panel palette.
 PANEL_BG = (33, 31, 29)
 PANEL_TITLE = (240, 240, 240)
@@ -67,11 +83,19 @@ class Board:
         self.selected = None                 # currently selected square, or None
         self.last_move = None                # last move played, for the trace
         self.new_game_rect = None            # game-over "New Game" button rect
+        # Promotion picker: None, or {"to": square, "color": bool} while the
+        # human is choosing which piece a promoting pawn becomes.
+        self.promotion = None
+        # Hint state: None, or {"move", "win_rate", "attackers"} — the current
+        # MCTS suggestion to display. self.hint_rect is the "?" button rect.
+        self.hint = None
+        self.hint_rect = None
         # Human-readable log of every move played, for the side panel. Each
         # entry is (color, "[Player] *** Move Pawn from A to B").
         self.move_log = []
         self._fonts = None                   # lazily-built (big, small) fonts
         self._log_font = None                # lazily-built move-log font
+        self._hint_font = None               # lazily-built (header, body) fonts
         # When flipped, the rank axis is mirrored so White sits at the bottom
         # (the human plays White). See the module docstring.
         self.flipped = flipped
@@ -117,6 +141,9 @@ class Board:
         self.sound.play(name)
         self.last_move = move
         self.selected = None
+        # A move ends any open promotion pick and stales any shown hint.
+        self.promotion = None
+        self.hint = None
 
     @staticmethod
     def _describe_move(board, move):
@@ -137,10 +164,17 @@ class Board:
     def draw(self):
         self._draw_squares()
         self._draw_highlights()
+        if self.hint is not None:
+            self._draw_hint_move()
         self._draw_pieces()
+        if self.promotion is not None:
+            self._draw_promotion()
         if self.board.is_game_over():
             self._draw_game_over()
         self._draw_move_log()
+        self._draw_hint_button()
+        if self.hint is not None and not self.board.is_game_over():
+            self._draw_hint_popup()
 
     def _draw_squares(self):
         for row in range(SQNUM):
@@ -244,6 +278,134 @@ class Board:
         return (self.board.is_game_over()
                 and self.new_game_rect is not None
                 and self.new_game_rect.collidepoint(pos))
+
+    # ----- promotion picker -----
+
+    def open_promotion(self, to_square, color):
+        """Open the promotion picker for a pawn of `color` landing on `to_square`.
+
+        Driven by HumanPlayer: while it is open, clicks are routed to
+        ``promotion_choice_at`` instead of forming new moves.
+        """
+        self.promotion = {"to": to_square, "color": color}
+
+    def _promotion_rects(self):
+        """[(piece_type, Rect)] for the open picker, stacked below `to`."""
+        x, _y = self.pixel_of(self.promotion["to"])
+        return [(pt, pygame.Rect(x, i * SQSIZE, SQSIZE, SQSIZE))
+                for i, pt in enumerate(PROMO_ORDER)]
+
+    def _draw_promotion(self):
+        """Draw the four promotion choices as a column from the target square."""
+        color = self.promotion["color"]
+        for pt, rect in self._promotion_rects():
+            pygame.draw.rect(self.screen, PROMO_CELL_BG, rect)
+            pygame.draw.rect(self.screen, PROMO_CELL_BORDER, rect, 2)
+            image = self.images.get(chess.Piece(pt, color).symbol())
+            if image is not None:
+                self.screen.blit(image, rect.topleft)
+
+    def promotion_choice_at(self, pos):
+        """Piece type the click at `pos` selects in the picker, or None (cancel)."""
+        if self.promotion is None:
+            return None
+        for pt, rect in self._promotion_rects():
+            if rect.collidepoint(pos):
+                return pt
+        return None
+
+    # ----- hint ("?") -----
+
+    def hint_clicked(self, pos):
+        """True if `pos` hits the "?" hint button (and the game is still on)."""
+        return (self.hint_rect is not None
+                and not self.board.is_game_over()
+                and self.hint_rect.collidepoint(pos))
+
+    def hint_attackers(self, move):
+        """Names of enemy pieces that could recapture on `move`'s destination.
+
+        Computed on the position *after* `move` is played (so it reflects the
+        real recapture threat), from the mover's opponent. Duplicates (e.g. two
+        pawns) are collapsed to one name. A hint aid, so pins are counted and
+        en-passant recaptures ignored.
+        """
+        mover = self.board.turn
+        after = self.board.copy()
+        after.push(move)
+        names = []
+        for sq in after.attackers(not mover, move.to_square):
+            piece = after.piece_at(sq)
+            if piece is not None:
+                name = chess.piece_name(piece.piece_type).title()
+                if name not in names:
+                    names.append(name)
+        return names
+
+    def _get_hint_font(self):
+        """Return the (header, body) hint fonts, building them once."""
+        if self._hint_font is None:
+            try:
+                if not pygame.font.get_init():
+                    pygame.font.init()
+                self._hint_font = (
+                    pygame.font.SysFont("Arial", 26, bold=True),
+                    pygame.font.SysFont("Arial", 20),
+                )
+            except Exception:
+                self._hint_font = (None, None)
+        return self._hint_font
+
+    def _draw_hint_button(self):
+        """Draw the "?" hint button in the panel's top-right corner."""
+        btn = pygame.Rect(TOTAL_WIDTH - 16 - 46, 14, 46, 46)
+        self.hint_rect = btn
+        pygame.draw.rect(self.screen, HINT_BTN_BG, btn, border_radius=8)
+        header, _body = self._get_hint_font()
+        if header is not None:
+            q = header.render("?", True, HINT_BTN_FG)
+            self.screen.blit(q, q.get_rect(center=btn.center))
+
+    def _draw_hint_move(self):
+        """Tint the suggested move's from/to squares with the hint accent."""
+        tint = pygame.Surface((SQSIZE, SQSIZE))
+        tint.set_alpha(HINTALPHA)
+        tint.fill(HINTCOLOR)
+        move = self.hint["move"]
+        for sq in (move.from_square, move.to_square):
+            self.screen.blit(tint, self.pixel_of(sq))
+
+    def _draw_hint_popup(self):
+        """Draw the suggestion box: recommended move, win rate, recapture threats."""
+        move = self.hint["move"]
+        pct = round(self.hint["win_rate"] * 100)
+        try:
+            san = self.board.san(move)
+        except Exception:
+            san = move.uci()
+        attackers = self.hint["attackers"]
+        threat = ", ".join(attackers) if attackers else "none"
+        lines = [
+            f"Play {san}  —  {pct}% win chance",
+            f"Can be recaptured by: {threat}",
+        ]
+
+        box = pygame.Rect(0, 0, 470, 118)
+        box.center = (WIDTH // 2, 78)
+        veil = pygame.Surface((box.width, box.height))
+        veil.set_alpha(225)
+        veil.fill(HINT_POPUP_BG)
+        self.screen.blit(veil, box.topleft)
+        pygame.draw.rect(self.screen, HINTCOLOR, box, 2, border_radius=8)
+
+        header, body = self._get_hint_font()
+        if header is None:
+            return
+        self.screen.blit(header.render("Hint", True, HINTCOLOR),
+                         (box.x + 16, box.y + 10))
+        for i, text in enumerate(lines):
+            self.screen.blit(body.render(text, True, HINT_POPUP_FG),
+                             (box.x + 16, box.y + 46 + i * 28))
 
     def _get_log_font(self):
         """Return the move-log (title, line) fonts, building them once."""
